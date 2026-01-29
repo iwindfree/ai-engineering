@@ -1,21 +1,20 @@
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_core.messages import  HumanMessage, SystemMessage, convert_to_messages
-from langchain_core.schema import Document
-from langchain_chroma import Chroma
+from pathlib import Path
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.messages import SystemMessage, HumanMessage, convert_to_messages
+from langchain_core.documents import Document
 
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
 MODEL="gpt-4.1-nano"
-DB_NAME=str(Path(__file__).parent / "vector_db")
+DB_NAME=str(Path(__file__).parent.parent / "vector_db")
 
 # embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
 RETRIEVAL_K = 10
-
-
 SYSTEM_PROMPT = """
 You are a knowledgeable, friendly assistant representing the company Insurellm.
 You are chatting with a user about Insurellm.
@@ -32,7 +31,7 @@ vectorstore = Chroma(
 retriever = vectorstore.as_retriever()
 llm = ChatOpenAI(model=MODEL, temperature=0)
 
-def fecth_context(question: str) -> List[Document]:
+def fetch_context(question: str) -> list[Document]:
     """주어진 질문에 대해 관련 컨텍스트 문서를 검색합니다.
 
     벡터 스토어에서 질문과 의미적으로 유사한 문서들을 검색하여 반환합니다.
@@ -79,7 +78,7 @@ def answer_question(question: str, history: list[dict] = []) -> str:
         LLM이 생성한 답변 문자열
     """
     combined_q = combined_question(question, history)
-    context_docs = fecth_context(combined_q)
+    context_docs = fetch_context(combined_q)
     context_text = "\n\n".join(doc.page_content for doc in context_docs)
 
     system_message = SystemMessage(content=SYSTEM_PROMPT.format(context=context_text))
@@ -102,6 +101,6 @@ def answer_question(question: str, history: list[dict] = []) -> str:
     messages = [system_message]
     messages.extend(convert_to_messages(history))
     messages.append(HumanMessage(content=question))
-    response = llm.invoke(messages=messages)
+    response = llm.invoke(messages)
 
-    return response.content
+    return response.content, context_docs
