@@ -37,7 +37,7 @@ OPENAI_API_KEY=sk-your-api-key
 ### 2. 문서 임베딩
 
 ```bash
-cd basic/day6/example
+cd llm_engineering/06_rag_basics/example
 python src/embed_documents.py
 ```
 

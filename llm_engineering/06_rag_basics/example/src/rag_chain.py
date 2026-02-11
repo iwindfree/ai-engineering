@@ -17,7 +17,7 @@ CHROMA_DB_DIR = BASE_DIR / "chroma_db"
 LLM_MODEL = "gpt-4o-mini"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
-SYSTEM_PROMPT = """당신은 TechMall 쇼핑몰의 친절한 고객 상담원입니다.
+SYSTEM_PROMPT = """당신은 하늘여행사의 친절한 고객 상담원입니다.
 
 ## 답변 지침
 - 아래 참고 자료를 기반으로 답변하세요.
@@ -61,6 +61,6 @@ def generate_answer(query: str, history: list = None):
 
 
 if __name__ == "__main__":
-    answer, docs = generate_answer("스마트워치 가격이 얼마인가요?")
+    answer, docs = generate_answer("비자대행 서비스도 가능한가요?")
     print(f"답변: {answer}")
     print(f"참조 문서: {len(docs)}개")
