@@ -5,6 +5,7 @@ RAG 체인 모듈 (Gradio 6.x 전용)
 from pathlib import Path
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
+from langchain_openai import OpenAIEmbeddings
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
@@ -15,7 +16,7 @@ load_dotenv(override=True)
 BASE_DIR = Path(__file__).parent.parent
 CHROMA_DB_DIR = BASE_DIR / "chroma_db"
 LLM_MODEL = "gpt-4o-mini"
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_MODEL = "text-embedding-3-small"
 
 SYSTEM_PROMPT = """당신은 하늘여행사의 친절한 고객 상담원입니다.
 
@@ -34,9 +35,9 @@ def generate_answer(query: str, history: list = None):
         history = []
 
     # 1. 벡터 검색
-    embedding = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    embedding = OpenAIEmbeddings(model=EMBEDDING_MODEL)
     vectorstore = Chroma(persist_directory=str(CHROMA_DB_DIR), embedding_function=embedding)
-    docs = vectorstore.similarity_search(query, k=5)
+    docs = vectorstore.similarity_search(query, k=10)
 
     # 2. 컨텍스트 구성
     context = "\n\n---\n\n".join(doc.page_content for doc in docs)

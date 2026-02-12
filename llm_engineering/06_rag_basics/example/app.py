@@ -1,5 +1,5 @@
 """
-TechMall 고객 상담 챗봇
+하늘 여행사 고객 상담 챗봇
 
 RAG 기반의 고객 상담 챗봇 웹 애플리케이션입니다.
 Gradio를 사용하여 대화형 UI를 제공합니다.
@@ -69,11 +69,11 @@ def handle_chat(message: str, chat_history: list) -> tuple[str, list, str]:
 
 def create_ui() -> gr.Blocks:
     """Gradio UI를 생성합니다."""
-    with gr.Blocks(title="TechMall 고객 상담") as ui:
+    with gr.Blocks(title="하늘여행사 고객 상담") as ui:
         # 헤더
         gr.Markdown("""
-        # 🛒 TechMall 고객 상담 챗봇
-        제품, 배송, 교환/환불, 보증 등 궁금한 점을 물어보세요!
+        # 🛒 하늘여행사 고객 상담 챗봇
+        여행 상품, 예약, 환불 등 궁금한 점을 물어보세요!
         """)
 
         with gr.Row():
@@ -104,11 +104,10 @@ def create_ui() -> gr.Blocks:
         # 예시 질문
         gr.Examples(
             examples=[
-                "SmartWatch Pro X1 가격이 얼마인가요?",
+                "하늘여행사의 여행 상품은 어떤 것이 있나요?",
                 "환불은 어떻게 신청하나요?",
-                "배송은 얼마나 걸리나요?",
-                "보증 기간을 연장할 수 있나요?",
-                "이어버드 한쪽만 구매 가능한가요?"
+                "예약은 어떻게 하나요?",
+                "국내 여행 상품을 추천해 주세요."
             ],
             inputs=user_input,
             label="💡 이런 질문을 해보세요"

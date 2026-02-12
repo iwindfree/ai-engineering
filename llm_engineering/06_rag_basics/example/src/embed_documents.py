@@ -13,17 +13,20 @@ from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
-
+from langchain_openai import OpenAIEmbeddings
 # 환경 변수 로드
 load_dotenv(override=True)
 
 # 경로 설정
-BASE_DIR = Path(__file__).parent.parent
-KNOWLEDGE_BASE_DIR = BASE_DIR.parent.parent / "rag_data" / "knowledge_base"
-CHROMA_DB_DIR = BASE_DIR / "chroma_db"
+CURRENT_DIR = Path(__file__).parent
+print(f"현재 디렉토리: {CURRENT_DIR}")
+BASE_DIR = CURRENT_DIR.parent.parent.parent
+print(f"베이스 디렉토리: {BASE_DIR}")
+KNOWLEDGE_BASE_DIR = BASE_DIR / "00_test_data" /  "knowledge_base"
+CHROMA_DB_DIR = BASE_DIR / "00_test_data" / "chroma_db"
 
 # 임베딩 모델 설정
-EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_MODEL_NAME = "text-embedding-3-small"
 
 # 청킹 설정
 CHUNK_SIZE = 500
@@ -93,7 +96,7 @@ def create_vector_store(chunks: list) -> Chroma:
 
     # 임베딩 모델 초기화
     print(f"🔧 임베딩 모델 로드 중: {EMBEDDING_MODEL_NAME}")
-    embedding_model = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
+    embedding_model = OpenAIEmbeddings(model=EMBEDDING_MODEL_NAME)
 
     # 벡터 스토어 생성
     print("💾 벡터 DB 생성 중...")
