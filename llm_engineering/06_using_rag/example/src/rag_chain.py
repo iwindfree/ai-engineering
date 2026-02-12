@@ -17,7 +17,6 @@ BASE_DIR = Path(__file__).parent.parent
 CHROMA_DB_DIR = BASE_DIR / "chroma_db"
 LLM_MODEL = "gpt-4o-mini"
 EMBEDDING_MODEL = "text-embedding-3-small"
-
 SYSTEM_PROMPT = """당신은 하늘여행사의 친절한 고객 상담원입니다.
 
 ## 답변 지침
