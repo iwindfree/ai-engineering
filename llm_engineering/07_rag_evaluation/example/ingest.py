@@ -7,6 +7,7 @@ from tqdm import tqdm
 from litellm import completion
 from multiprocessing import Pool
 from tenacity import retry, wait_exponential
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
 
 
@@ -14,8 +15,10 @@ load_dotenv(override=True)
 
 MODEL = "openai/gpt-4.1-nano"  # 청킹용 LLM 모델
 
-DB_NAME = str(Path(__file__).parent / "vector_db")  # ChromaDB 저장 경로
+DB_NAME = str(Path(__file__).parent / "vector_db")  # ChromaDB 저장 경로 (LLM 청킹)
+DB_NAME_MD = str(Path(__file__).parent / "vector_db_md")  # ChromaDB 저장 경로 (마크다운 청킹)
 collection_name = "docs"
+md_collection_name = "docs_markdown"
 embedding_model = "text-embedding-3-large"
 KNOWLEDGE_BASE_PATH = Path(__file__).parent.parent.parent / "00_test_data" / "knowledge_base"  # 원본 문서 경로
 AVERAGE_CHUNK_SIZE = 100  # 청크 수 추정용 평균 글자 수 기준
@@ -132,6 +135,81 @@ def create_chunks(documents):
 
 
 
+def chunk_markdown_document(document):
+    """마크다운 헤더 기반 2단계 청킹
+
+    1단계: # ## ### 헤더 기준으로 1차 분할 (의미 단위 보존)
+    2단계: 800자 초과 청크는 RecursiveCharacterTextSplitter로 2차 분할
+    각 청크 앞에 헤더 경로 접두사 추가 (검색 품질 향상)
+    """
+    headers_to_split_on = [
+        ("#", "h1"),
+        ("##", "h2"),
+        ("###", "h3"),
+    ]
+
+    md_splitter = MarkdownHeaderTextSplitter(
+        headers_to_split_on=headers_to_split_on,
+        strip_headers=False,
+    )
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800,
+        chunk_overlap=100,
+    )
+
+    md_splits = md_splitter.split_text(document["text"])
+
+    chunks = []
+    for split in md_splits:
+        header_path = " > ".join(
+            split.metadata[k] for k in ["h1", "h2", "h3"] if k in split.metadata
+        )
+
+        base_metadata = {
+            "source": document["source"],
+            "type": document["type"],
+            "headers": header_path,
+        }
+
+        if len(split.page_content) > 800:
+            sub_splits = text_splitter.split_text(split.page_content)
+            for sub in sub_splits:
+                content = f"{header_path}\n\n{sub}" if header_path else sub
+                chunks.append(Result(page_content=content, metadata=base_metadata.copy()))
+        else:
+            content = f"{header_path}\n\n{split.page_content}" if header_path else split.page_content
+            chunks.append(Result(page_content=content, metadata=base_metadata.copy()))
+
+    return chunks
+
+
+def create_md_chunks(documents):
+    """전체 문서를 마크다운 헤더 기반으로 청킹"""
+    chunks = []
+    for doc in tqdm(documents, desc="Markdown chunking"):
+        chunks.extend(chunk_markdown_document(doc))
+    print(f"Markdown chunking: {len(chunks)} chunks created")
+    return chunks
+
+
+def create_md_embeddings(chunks):
+    """마크다운 청크를 임베딩하여 vector_db_md에 저장"""
+    chroma = PersistentClient(path=DB_NAME_MD)
+    if md_collection_name in [c.name for c in chroma.list_collections()]:
+        chroma.delete_collection(md_collection_name)
+
+    texts = [chunk.page_content for chunk in chunks]
+    emb = openai.embeddings.create(model=embedding_model, input=texts).data
+    vectors = [e.embedding for e in emb]
+
+    collection = chroma.get_or_create_collection(md_collection_name)
+    ids = [str(i) for i in range(len(chunks))]
+    metas = [chunk.metadata for chunk in chunks]
+    collection.add(ids=ids, embeddings=vectors, documents=texts, metadatas=metas)
+    print(f"Markdown vectorstore created with {collection.count()} documents")
+
+
 def create_embeddings(chunks):
     """청크들을 임베딩하여 ChromaDB에 저장 (기존 컬렉션이 있으면 삭제 후 재생성)"""
     chroma = PersistentClient(path=DB_NAME)
@@ -154,13 +232,20 @@ def create_embeddings(chunks):
 
 
 def run_ingest():
-    """외부에서 호출 가능한 ingest 파이프라인"""
+    """외부에서 호출 가능한 ingest 파이프라인 (LLM 청킹 + 마크다운 청킹)"""
     documents = fetch_documents()
-    chunks = create_chunks(documents)
-    create_embeddings(chunks)
-    return len(documents), len(chunks)
+
+    # LLM 청킹 → vector_db
+    llm_chunks = create_chunks(documents)
+    create_embeddings(llm_chunks)
+
+    # 마크다운 청킹 → vector_db_md
+    md_chunks = create_md_chunks(documents)
+    create_md_embeddings(md_chunks)
+
+    return len(documents), len(llm_chunks), len(md_chunks)
 
 
 if __name__ == "__main__":
-    run_ingest()
-    print("Ingestion complete")
+    doc_count, llm_count, md_count = run_ingest()
+    print(f"Ingestion complete: {doc_count} docs → LLM {llm_count} chunks, MD {md_count} chunks")

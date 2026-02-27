@@ -5,7 +5,10 @@ from litellm import completion
 from dotenv import load_dotenv
 
 from test import TestQuestion, load_tests
-from answer import answer_question_basic, fetch_context_multi, RETRIEVAL_K
+from answer import (
+    answer_question_basic, fetch_context_multi, RETRIEVAL_K,
+    run_pipeline, PipelineConfig, STEP_PRESETS,
+)
 
 load_dotenv(override=True)
 MODEL = "openai/gpt-4.1-nano"
@@ -101,29 +104,13 @@ def calculate_recall_at_k(source_docs: list[str], retrieved_docs: list, k: int) 
     return found / len(source_set)
 
 
-def evaluate_retrieval(test: TestQuestion, k: int = RETRIEVAL_K) -> RetrievalEval:
-    """
-    단일 테스트에 대한 검색 평가 수행 (Reranking 포함)
-
-    검색 파이프라인: 벡터 유사도 검색 → Reranking → 평가
-
-    Args:
-        test: TestQuestion object containing question, source_docs and keywords
-        k: Number of top documents to retrieve
-
-    Returns:
-        RetrievalEval object with MRR, nDCG, Precision@K, Recall@K, and keyword coverage metrics
-    """
-    # Retrieve documents using basic strategy (original query only)
-    retrieved_docs = fetch_context_multi(test.question, [test.question])
-
-    # 문서 ID 기반 지표
+def _evaluate_retrieval_from_docs(test: TestQuestion, retrieved_docs: list, k: int = RETRIEVAL_K) -> RetrievalEval:
+    """검색 결과 리스트로부터 검색 지표를 계산 (공통 로직)"""
     mrr = calculate_mrr(test.source_docs, retrieved_docs)
     ndcg = calculate_ndcg(test.source_docs, retrieved_docs, k)
     precision = calculate_precision_at_k(test.source_docs, retrieved_docs, k)
     recall = calculate_recall_at_k(test.source_docs, retrieved_docs, k)
 
-    # 키워드 기반 보조 지표
     all_content = " ".join(doc.page_content.lower() for doc in retrieved_docs[:k])
     keywords_found = sum(1 for kw in test.keywords if kw.lower() in all_content)
     total_keywords = len(test.keywords)
@@ -136,20 +123,9 @@ def evaluate_retrieval(test: TestQuestion, k: int = RETRIEVAL_K) -> RetrievalEva
         keyword_coverage=coverage,
     )
 
-def evaluate_answer(test: TestQuestion) -> tuple[AnswerEval, str, list]:
-    """
-    Evaluate answer quality using LLM-as-a-judge.
 
-    Args:
-        test: TestQuestion object containing question and reference answer
-
-    Returns:
-        Tuple of (AnswerEval object, generated_answer string, retrieved_docs list)
-    """
-    # Get RAG response using basic strategy
-    generated_answer, retrieved_docs = answer_question_basic(test.question)
-
-    # LLM judge prompt
+def _evaluate_answer_from_text(test: TestQuestion, generated_answer: str) -> AnswerEval:
+    """생성된 답변 텍스트로부터 LLM-as-a-judge 평가 (공통 로직)"""
     judge_messages = [
         {
             "role": "system",
@@ -174,12 +150,47 @@ Please evaluate the generated answer on three dimensions:
 Provide detailed feedback and scores from 1 (very poor) to 5 (ideal) for each dimension. If the answer is wrong, then the accuracy score must be 1.""",
         },
     ]
-
-    # Call LLM judge with structured outputs
     judge_response = completion(model=MODEL, messages=judge_messages, response_format=AnswerEval)
+    return AnswerEval.model_validate_json(judge_response.choices[0].message.content)
 
-    answer_eval = AnswerEval.model_validate_json(judge_response.choices[0].message.content)
 
+def evaluate_with_config(test: TestQuestion, config: PipelineConfig, k: int = RETRIEVAL_K) -> tuple[RetrievalEval, AnswerEval, str]:
+    """설정 기반 평가: run_pipeline으로 답변 생성 후 검색·답변 품질 모두 평가
+
+    Returns:
+        (RetrievalEval, AnswerEval, answer_text)
+    """
+    answer_text, retrieved_docs = run_pipeline(test.question, config)
+    retrieval_eval = _evaluate_retrieval_from_docs(test, retrieved_docs, k)
+    answer_eval = _evaluate_answer_from_text(test, answer_text)
+    return retrieval_eval, answer_eval, answer_text
+
+
+def run_comparison(configs: list[PipelineConfig], tests: list[TestQuestion]):
+    """선택된 config 목록 × 테스트 목록 순회하며 평가 결과를 yield
+
+    Yields:
+        (config_name, test_idx, retrieval_eval, answer_eval, answer_text, progress)
+    """
+    total = len(configs) * len(tests)
+    done = 0
+    for config in configs:
+        for test_idx, test in enumerate(tests):
+            retrieval_eval, answer_eval, answer_text = evaluate_with_config(test, config)
+            done += 1
+            progress = done / total
+            yield config.name, test_idx, retrieval_eval, answer_eval, answer_text, progress
+
+
+def evaluate_retrieval(test: TestQuestion, k: int = RETRIEVAL_K) -> RetrievalEval:
+    """단일 테스트에 대한 검색 평가 수행 (기존 호환용: 벡터 검색 + Reranking)"""
+    retrieved_docs = fetch_context_multi(test.question, [test.question])
+    return _evaluate_retrieval_from_docs(test, retrieved_docs, k)
+
+def evaluate_answer(test: TestQuestion) -> tuple[AnswerEval, str, list]:
+    """단일 테스트에 대한 답변 평가 (기존 호환용: basic 전략)"""
+    generated_answer, retrieved_docs = answer_question_basic(test.question)
+    answer_eval = _evaluate_answer_from_text(test, generated_answer)
     return answer_eval, generated_answer, retrieved_docs
 
 
