@@ -22,12 +22,22 @@ wait = wait_exponential(multiplier=1, min=10, max=240)  # API 재시도 대기 (
 
 openai = OpenAI()
 
-# 모듈 로드 시점에 벡터 DB 연결 (ingest 후에는 reload_collection()으로 재로드)
-chroma = PersistentClient(path=DB_NAME)
-collection = chroma.get_or_create_collection(collection_name)
+# 컬렉션은 lazy 초기화 — ingest 전에는 DB가 없을 수 있으므로 모듈 로드 시점에 열지 않음
+chroma = None
+collection = None
+chroma_md = None
+md_collection = None
 
-chroma_md = PersistentClient(path=DB_NAME_MD)
-md_collection = chroma_md.get_or_create_collection(md_collection_name)
+
+def _ensure_collections():
+    """컬렉션이 초기화되지 않았을 때만 PersistentClient를 열어 연결"""
+    global chroma, collection, chroma_md, md_collection
+    if collection is None:
+        chroma = PersistentClient(path=DB_NAME)
+        collection = chroma.get_or_create_collection(collection_name)
+    if md_collection is None:
+        chroma_md = PersistentClient(path=DB_NAME_MD)
+        md_collection = chroma_md.get_or_create_collection(md_collection_name)
 
 
 def reload_collection():
@@ -342,6 +352,7 @@ def fetch_context_hybrid(question: str, coll, top_k=RETRIEVAL_K) -> list[Result]
 
 def fetch_context_unranked(question: str) -> list[Result]:
     """기존 호환용: LLM 컬렉션에서 벡터 검색"""
+    _ensure_collections()
     return fetch_context_vector_only(question, collection)
 
 
@@ -397,6 +408,7 @@ def run_pipeline(question: str, config: PipelineConfig, history: list[dict] = []
         print(f"  [{i}] {q}")
 
     # 2. 컬렉션 선택
+    _ensure_collections()
     coll = md_collection if config.chunking == "markdown" else collection
 
     # 3. 검색

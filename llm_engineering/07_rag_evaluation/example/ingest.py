@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from chromadb import PersistentClient
 from tqdm import tqdm
 from litellm import completion
-from multiprocessing import Pool
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tenacity import retry, wait_exponential
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
@@ -61,12 +61,14 @@ class Chunks(BaseModel):
     chunks: list[Chunk]
 
 
-def fetch_documents():
+def fetch_documents(knowledge_base_path: Path = KNOWLEDGE_BASE_PATH) -> list[dict]:
     """A homemade version of the LangChain DirectoryLoader"""
 
     documents = []
 
-    for folder in KNOWLEDGE_BASE_PATH.iterdir():
+    for folder in knowledge_base_path.iterdir():
+        if not folder.is_dir():
+            continue
         doc_type = folder.name
         for file in folder.rglob("*.md"):
             with open(file, "r", encoding="utf-8") as f:
@@ -78,9 +80,9 @@ def fetch_documents():
 
 
 
-def make_prompt(document):
+def make_prompt(document, avg_chunk_size=AVERAGE_CHUNK_SIZE):
     """문서를 청킹하기 위한 LLM 프롬프트 생성 (25% 오버랩 포함 지시)"""
-    how_many = (len(document["text"]) // AVERAGE_CHUNK_SIZE) + 1  # 문서 길이 기반 권장 청크 수
+    how_many = (len(document["text"]) // avg_chunk_size) + 1  # 문서 길이 기반 권장 청크 수
     return f"""
 You take a document and you split the document into overlapping chunks for a KnowledgeBase.
 
@@ -104,42 +106,81 @@ Respond with the chunks.
 """
 
 
-def make_messages(document):
+def make_messages(document, avg_chunk_size=AVERAGE_CHUNK_SIZE):
     """LLM API 호출용 메시지 리스트 생성"""
     return [
-        {"role": "user", "content": make_prompt(document)},
+        {"role": "user", "content": make_prompt(document, avg_chunk_size)},
     ]
 
 
 @retry(wait=wait)
-def process_document(document):
+def process_document(document, avg_chunk_size=AVERAGE_CHUNK_SIZE):
     """단일 문서를 LLM으로 청킹하여 Result 리스트로 반환 (재시도 포함)"""
-    messages = make_messages(document)
-    # Structured Output (response_format)으로 Chunks 스키마 강제
+    messages = make_messages(document, avg_chunk_size)
     response = completion(model=MODEL, messages=messages, response_format=Chunks)
     reply = response.choices[0].message.content
     doc_as_chunks = Chunks.model_validate_json(reply).chunks
     return [chunk.as_result(document) for chunk in doc_as_chunks]
 
 
-def create_chunks(documents):
-    """
-    Create chunks using a number of workers in parallel.
-    If you get a rate limit error, set the WORKERS to 1.
-    """
+def create_chunks(documents, avg_chunk_size=AVERAGE_CHUNK_SIZE, workers=WORKERS):
+    """ThreadPoolExecutor로 병렬 LLM 청킹 (I/O 바운드 → 스레드가 적합)"""
     chunks = []
-    with Pool(processes=WORKERS) as pool:
-        for result in tqdm(pool.imap_unordered(process_document, documents), total=len(documents)):
-            chunks.extend(result)
+    total = len(documents)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(process_document, doc, avg_chunk_size) for doc in documents]
+        for future in tqdm(as_completed(futures), total=total, desc="LLM chunking"):
+            chunks.extend(future.result())
     return chunks
 
 
+def run_ingest_stream(
+    mode: str = "both",
+    avg_chunk_size: int = AVERAGE_CHUNK_SIZE,
+    workers: int = WORKERS,
+    md_chunk_size: int = 800,
+    md_chunk_overlap: int = 100,
+    knowledge_base_path: Path = KNOWLEDGE_BASE_PATH,
+):
+    """Generator: 진행 상황을 실시간으로 yield하는 ingest 파이프라인.
 
-def chunk_markdown_document(document):
+    yields (done, total, stage, extra)
+      stage "llm"          : LLM 청킹 진행 중 (done/total 업데이트)
+      stage "embedding"    : LLM 임베딩 저장 완료
+      stage "md_embedding" : 마크다운 임베딩 저장 완료
+      stage "done"         : 전체 완료, extra = {"doc_count", "llm_count", "md_count"}
+    """
+    documents = fetch_documents(knowledge_base_path)
+    total = len(documents)
+    llm_count = md_count = None
+
+    if mode in ("llm", "both"):
+        llm_chunks = []
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(process_document, doc, avg_chunk_size) for doc in documents]
+            for i, future in enumerate(as_completed(futures), 1):
+                llm_chunks.extend(future.result())
+                yield i, total, "llm", None  # 문서 1개 완료마다 caller에서 yield
+
+        create_embeddings(llm_chunks)
+        llm_count = len(llm_chunks)
+        yield total, total, "embedding", None
+
+    if mode in ("markdown", "both"):
+        md_chunks = create_md_chunks(documents, md_chunk_size, md_chunk_overlap)
+        create_md_embeddings(md_chunks)
+        md_count = len(md_chunks)
+        yield total, total, "md_embedding", None
+
+    yield total, total, "done", {"doc_count": total, "llm_count": llm_count, "md_count": md_count}
+
+
+
+def chunk_markdown_document(document, md_chunk_size=800, md_chunk_overlap=100):
     """마크다운 헤더 기반 2단계 청킹
 
     1단계: # ## ### 헤더 기준으로 1차 분할 (의미 단위 보존)
-    2단계: 800자 초과 청크는 RecursiveCharacterTextSplitter로 2차 분할
+    2단계: md_chunk_size 초과 청크는 RecursiveCharacterTextSplitter로 2차 분할
     각 청크 앞에 헤더 경로 접두사 추가 (검색 품질 향상)
     """
     headers_to_split_on = [
@@ -154,8 +195,8 @@ def chunk_markdown_document(document):
     )
 
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=100,
+        chunk_size=md_chunk_size,
+        chunk_overlap=md_chunk_overlap,
     )
 
     md_splits = md_splitter.split_text(document["text"])
@@ -172,7 +213,7 @@ def chunk_markdown_document(document):
             "headers": header_path,
         }
 
-        if len(split.page_content) > 800:
+        if len(split.page_content) > md_chunk_size:
             sub_splits = text_splitter.split_text(split.page_content)
             for sub in sub_splits:
                 content = f"{header_path}\n\n{sub}" if header_path else sub
@@ -184,11 +225,11 @@ def chunk_markdown_document(document):
     return chunks
 
 
-def create_md_chunks(documents):
+def create_md_chunks(documents, md_chunk_size=800, md_chunk_overlap=100):
     """전체 문서를 마크다운 헤더 기반으로 청킹"""
     chunks = []
     for doc in tqdm(documents, desc="Markdown chunking"):
-        chunks.extend(chunk_markdown_document(doc))
+        chunks.extend(chunk_markdown_document(doc, md_chunk_size, md_chunk_overlap))
     print(f"Markdown chunking: {len(chunks)} chunks created")
     return chunks
 
@@ -231,19 +272,32 @@ def create_embeddings(chunks):
 
 
 
-def run_ingest():
-    """외부에서 호출 가능한 ingest 파이프라인 (LLM 청킹 + 마크다운 청킹)"""
-    documents = fetch_documents()
+def run_ingest(
+    mode: str = "both",
+    avg_chunk_size: int = AVERAGE_CHUNK_SIZE,
+    workers: int = WORKERS,
+    md_chunk_size: int = 800,
+    md_chunk_overlap: int = 100,
+    knowledge_base_path: Path = KNOWLEDGE_BASE_PATH,
+) -> tuple[int, int | None, int | None]:
+    """외부에서 호출 가능한 ingest 파이프라인 (CLI용)
 
-    # LLM 청킹 → vector_db
-    llm_chunks = create_chunks(documents)
-    create_embeddings(llm_chunks)
+    mode: "llm" | "markdown" | "both"
+    """
+    documents = fetch_documents(knowledge_base_path)
+    llm_count, md_count = None, None
 
-    # 마크다운 청킹 → vector_db_md
-    md_chunks = create_md_chunks(documents)
-    create_md_embeddings(md_chunks)
+    if mode in ("llm", "both"):
+        llm_chunks = create_chunks(documents, avg_chunk_size, workers)
+        create_embeddings(llm_chunks)
+        llm_count = len(llm_chunks)
 
-    return len(documents), len(llm_chunks), len(md_chunks)
+    if mode in ("markdown", "both"):
+        md_chunks = create_md_chunks(documents, md_chunk_size, md_chunk_overlap)
+        create_md_embeddings(md_chunks)
+        md_count = len(md_chunks)
+
+    return len(documents), llm_count, md_count
 
 
 if __name__ == "__main__":
